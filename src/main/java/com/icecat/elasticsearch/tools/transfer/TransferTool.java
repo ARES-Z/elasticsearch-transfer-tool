@@ -48,7 +48,7 @@ public class TransferTool {
         try {
             CommandLine line = parser.parse(options, args);
             if (!line.hasOption("sh") || !line.hasOption("th")) {
-                formatter.printHelp("transfer", options);
+                formatter.printHelp("transfer.sh", options);
                 return;
             }
             if (line.hasOption("setting") && line.hasOption("si") && line.hasOption("ti")) {
@@ -70,7 +70,7 @@ public class TransferTool {
                     System.err.println("Parsing failed.  Reason: Missing type of source or target");
                 }
             } else {
-                formatter.printHelp("transfer", options);
+                formatter.printHelp("transfer.sh", options);
             }
         } catch (ParseException exp) {
             // oops, something went wrong
