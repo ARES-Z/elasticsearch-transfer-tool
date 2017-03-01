@@ -42,7 +42,8 @@ public class TransferTool {
         Option targetHostOp = new Option("th", "target-host", true, "数据源");
         Option targetIndexOp = new Option("ti", "target-index", true, "迁移后的index");
         Option targetTypeOp = new Option("tt", "target-type", true, "迁移后的type");
-        options.addOption(settingOp).addOption(mappingOp).addOption(dataOp).addOption(sourceHostOp).addOption(sourceIndexOp).addOption(sourceTypeOp).addOption(targetHostOp).addOption(targetIndexOp).addOption(targetTypeOp);
+        Option bulkSizeOp = new Option("bs", "bulk-size", true, "迁移数据写入时的bulk大小");
+        options.addOption(settingOp).addOption(mappingOp).addOption(dataOp).addOption(sourceHostOp).addOption(sourceIndexOp).addOption(sourceTypeOp).addOption(targetHostOp).addOption(targetIndexOp).addOption(targetTypeOp).addOption(bulkSizeOp);
         HelpFormatter formatter = new HelpFormatter();
         CommandLineParser parser = new DefaultParser();
         try {
@@ -62,10 +63,11 @@ public class TransferTool {
                     System.err.println("Parsing failed.  Reason: Missing type of source or target");
                 }
             } else if (line.hasOption("data")) {
+                int bulkSize = Integer.parseInt(line.getOptionValue("bs", "1000"));
                 if (!line.hasOption("st") && !line.hasOption("tt")) {
-                    transferData(line.getOptionValue("sh"), line.getOptionValue("si"), line.getOptionValue("th"), line.getOptionValue("ti"));
+                    transferData(line.getOptionValue("sh"), line.getOptionValue("si"), line.getOptionValue("th"), line.getOptionValue("ti"), bulkSize);
                 } else if (line.hasOption("st") && line.hasOption("tt")) {
-                    transferData(line.getOptionValue("sh"), line.getOptionValue("si"), line.getOptionValue("st"), line.getOptionValue("th"), line.getOptionValue("ti"), line.getOptionValue("tt"));
+                    transferData(line.getOptionValue("sh"), line.getOptionValue("si"), line.getOptionValue("st"), line.getOptionValue("th"), line.getOptionValue("ti"), line.getOptionValue("tt"), bulkSize);
                 } else {
                     System.err.println("Parsing failed.  Reason: Missing type of source or target");
                 }
@@ -157,29 +159,29 @@ public class TransferTool {
         }
     }
 
-    public static void transferData(final String sourceHost, final String sourceIndex, final String targetHost, final String targetIndex) throws ClientProtocolException, IOException {
+    public static void transferData(final String sourceHost, final String sourceIndex, final String targetHost, final String targetIndex, final int bulkSize) throws ClientProtocolException, IOException {
         List<String> types = selectAllTypes(sourceHost, sourceIndex);
         for (String type : types) {
             try {
-                transferData(sourceHost, sourceIndex, type, targetHost, targetIndex, type);
+                transferData(sourceHost, sourceIndex, type, targetHost, targetIndex, type, bulkSize);
             } catch (Exception e) {
                 e.printStackTrace();
             }
         }
     }
 
-    public static void transferData(final String sourceHost, final String sourceIndex, final String sourceType, final String targetHost, final String targetIndex, final String targetType) throws ClientProtocolException, IOException {
+    public static void transferData(final String sourceHost, final String sourceIndex, final String sourceType, final String targetHost, final String targetIndex, final String targetType, final int bulkSize) throws ClientProtocolException,
+            IOException {
         CloseableHttpClient httpclient = HttpClients.createDefault();
         try {
 
             HttpPost httppost = new HttpPost("http://" + sourceHost + "/" + sourceIndex + "/" + sourceType + "/_search");
             final Gson gson = new Gson();
             Map<String, Object> map = Maps.newHashMap();
-            int size = 1000;
             double count = docsCount(sourceHost, sourceIndex, sourceType);
-            for (int from = 0; from < count; from += size) {
+            for (int from = 0; from < count; from += bulkSize) {
                 map.put("from", from);
-                map.put("size", size);
+                map.put("size", bulkSize);
                 StringEntity myEntity = new StringEntity(gson.toJson(map), "UTF-8");
                 httppost.setEntity(myEntity);
                 System.out.println("Executing request " + httppost.getRequestLine());
@@ -187,19 +189,14 @@ public class TransferTool {
 
                     @Override
                     public List<Map> handleResponse(final HttpResponse response) throws ClientProtocolException, IOException {
-                        List<Map> list = Lists.newArrayList();
                         int status = response.getStatusLine().getStatusCode();
                         if (status >= 200 && status < 300) {
                             HttpEntity entity = response.getEntity();
                             Map map = gson.fromJson(EntityUtils.toString(entity, "UTF-8"), Map.class);
-                            List<Map> hits = (List) (((Map) (map.get("hits"))).get("hits"));
-                            for (Map hitMap : hits) {
-                                list.add(((Map) hitMap.get("_source")));
-                            }
+                            return (List) (((Map) (map.get("hits"))).get("hits"));
                         } else {
                             throw new ClientProtocolException("Unexpected response status: " + status);
                         }
-                        return list;
                     }
 
                 };
@@ -241,8 +238,8 @@ public class TransferTool {
         StringBuilder messages = new StringBuilder();
         Gson gson = new Gson();
         for (Map doc : docs) {
-            messages.append("{ \"create\" : { \"_index\" : \"" + index + "\", \"_type\" : \"" + type + "\" } }").append("\n");
-            messages.append(gson.toJson(doc)).append("\n");
+            messages.append("{ \"create\" : { \"_index\" : \"" + index + "\", \"_type\" : \"" + type + "\" , \"_id\" : \"" + doc.get("_id") + "\" } }").append("\n");
+            messages.append(gson.toJson(doc.get("_source"))).append("\n");
         }
         try {
             HttpPost httpget = new HttpPost("http://" + host + "/_bulk");
