@@ -6,6 +6,7 @@ elasticsearch 迁移工具
 
 ```
 usage: transfer.sh
+ -bs,--bulk-size <arg>      迁移数据写入时的bulk大小
  -data                      迁移数据
  -mapping                   迁移mappings
  -setting                   迁移settings
