@@ -5,7 +5,7 @@ elasticsearch 数据迁移工具
 * 支持index 数据迁移
 
 ```
-usage: transfer
+usage: transfer.sh
  -data                      迁移数据
  -mapping                   迁移mappings
  -setting                   迁移settings
