@@ -1,5 +1,5 @@
 # elasticsearch-transfer-tool
-elasticsearch 数据迁移工具
+elasticsearch 迁移工具
 * 支持index setting迁移
 * 支持index mapping迁移
 * 支持index 数据迁移
