@@ -3,6 +3,7 @@ package com.icecat.elasticsearch.tools.transfer;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -26,7 +27,6 @@ import org.apache.http.util.EntityUtils;
 import com.google.common.base.Function;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import com.google.gson.Gson;
 
 public class TransferTool {
@@ -173,18 +173,19 @@ public class TransferTool {
     public static void transferData(final String sourceHost, final String sourceIndex, final String sourceType, final String targetHost, final String targetIndex, final String targetType, final int bulkSize) throws ClientProtocolException,
             IOException {
         CloseableHttpClient httpclient = HttpClients.createDefault();
+        final List<String> scrollId = Lists.newArrayList();
+        final AtomicInteger count = new AtomicInteger(0);
         try {
-
-            HttpPost httppost = new HttpPost("http://" + sourceHost + "/" + sourceIndex + "/" + sourceType + "/_search");
-            final Gson gson = new Gson();
-            Map<String, Object> map = Maps.newHashMap();
-            double count = docsCount(sourceHost, sourceIndex, sourceType);
-            for (int from = 0; from < count; from += bulkSize) {
-                map.put("from", from);
-                map.put("size", bulkSize);
-                StringEntity myEntity = new StringEntity(gson.toJson(map), "UTF-8");
-                httppost.setEntity(myEntity);
+            while (true) {
+                HttpPost httppost = new HttpPost("http://" + sourceHost + "/_search/scroll?scroll=1m&size=" + bulkSize);
+                if (scrollId.isEmpty()) {
+                    httppost = new HttpPost("http://" + sourceHost + "/" + sourceIndex + "/" + sourceType + "/_search?scroll=1m&size=" + bulkSize);
+                } else {
+                    StringEntity myEntity = new StringEntity(scrollId.get(0), "UTF-8");
+                    httppost.setEntity(myEntity);
+                }
                 System.out.println("Executing request " + httppost.getRequestLine());
+                final Gson gson = new Gson();
                 ResponseHandler<List<Map>> responseHandler = new ResponseHandler<List<Map>>() {
 
                     @Override
@@ -193,6 +194,8 @@ public class TransferTool {
                         if (status >= 200 && status < 300) {
                             HttpEntity entity = response.getEntity();
                             Map map = gson.fromJson(EntityUtils.toString(entity, "UTF-8"), Map.class);
+                            scrollId.clear();
+                            scrollId.add(map.get("_scroll_id").toString());
                             return (List) (((Map) (map.get("hits"))).get("hits"));
                         } else {
                             throw new ClientProtocolException("Unexpected response status: " + status);
@@ -200,34 +203,17 @@ public class TransferTool {
                     }
 
                 };
-                createDocs(targetHost, targetIndex, targetType, httpclient.execute(httppost, responseHandler));
-            }
-        } finally {
-            httpclient.close();
-        }
-    }
-
-    private static double docsCount(final String host, final String index, final String type) throws ClientProtocolException, IOException {
-        CloseableHttpClient httpclient = HttpClients.createDefault();
-        try {
-            HttpGet httpget = new HttpGet("http://" + host + "/" + index + "/" + type + "/_count");
-            System.out.println("Executing request " + httpget.getRequestLine());
-            ResponseHandler<Double> responseHandler = new ResponseHandler<Double>() {
-
-                @Override
-                public Double handleResponse(final HttpResponse response) throws ClientProtocolException, IOException {
-                    int status = response.getStatusLine().getStatusCode();
-                    final Gson gson = new Gson();
-                    if (status >= 200 && status < 300) {
-                        HttpEntity entity = response.getEntity();
-                        Map map = gson.fromJson(EntityUtils.toString(entity, "UTF-8"), Map.class);
-                        return Double.parseDouble(map.get("count").toString());
-                    }
-                    throw new ClientProtocolException("Unexpected response status: " + status);
+                List<Map> result = httpclient.execute(httppost, responseHandler);
+                if (result.isEmpty()) {
+                    System.out.println("total " + count.get());
+                    break;
                 }
-
-            };
-            return httpclient.execute(httpget, responseHandler);
+                count.addAndGet(result.size());
+                createDocs(targetHost, targetIndex, targetType, result);
+                System.out.println("insert " + count);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
         } finally {
             httpclient.close();
         }
@@ -241,17 +227,21 @@ public class TransferTool {
             messages.append("{ \"create\" : { \"_index\" : \"" + index + "\", \"_type\" : \"" + type + "\" , \"_id\" : \"" + doc.get("_id") + "\" } }").append("\n");
             messages.append(gson.toJson(doc.get("_source"))).append("\n");
         }
+        // System.out.println(messages);
         try {
-            HttpPost httpget = new HttpPost("http://" + host + "/_bulk");
+            HttpPost httpPost = new HttpPost("http://" + host + "/_bulk");
             StringEntity entity = new StringEntity(messages.toString(), "UTF-8");
-            httpget.setEntity(entity);
-            System.out.println("Executing request " + httpget.getRequestLine());
-            CloseableHttpResponse response = httpclient.execute(httpget);
+            httpPost.setEntity(entity);
+            System.out.println("Executing request " + httpPost.getRequestLine());
+            CloseableHttpResponse response = httpclient.execute(httpPost);
             if (response.getStatusLine().getStatusCode() < 200 || response.getStatusLine().getStatusCode() >= 300) {
                 throw new ClientProtocolException("Unexpected response status: " + response.getStatusLine().getStatusCode());
             }
+        } catch (Exception e) {
+            e.printStackTrace();
         } finally {
             httpclient.close();
+            refresh(index, host);
         }
     }
 
@@ -284,6 +274,25 @@ public class TransferTool {
 
             };
             return httpclient.execute(httpget, responseHandler);
+        } finally {
+            httpclient.close();
+        }
+    }
+
+    private static void refresh(String index, String host) throws IOException {
+        CloseableHttpClient httpclient = HttpClients.createDefault();
+        StringBuilder messages = new StringBuilder();
+        try {
+            HttpPost httpget = new HttpPost("http://" + host + "/" + index + "/_refresh");
+            StringEntity entity = new StringEntity(messages.toString(), "UTF-8");
+            httpget.setEntity(entity);
+            System.out.println("Executing request " + httpget.getRequestLine());
+            CloseableHttpResponse response = httpclient.execute(httpget);
+            if (response.getStatusLine().getStatusCode() < 200 || response.getStatusLine().getStatusCode() >= 300) {
+                throw new ClientProtocolException("Unexpected response status: " + response.getStatusLine().getStatusCode());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
         } finally {
             httpclient.close();
         }
