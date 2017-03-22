@@ -208,8 +208,8 @@ public class TransferTool {
                     System.out.println("total " + count.get());
                     break;
                 }
-                count.addAndGet(result.size());
                 createDocs(targetHost, targetIndex, targetType, result);
+                count.addAndGet(result.size());
                 System.out.println("insert " + count);
             }
         } catch (Exception e) {
