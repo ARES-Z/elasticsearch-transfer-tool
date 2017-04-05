@@ -12,6 +12,7 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.ClientProtocolException;
@@ -25,8 +26,10 @@ import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 
 import com.google.common.base.Function;
+import com.google.common.base.Predicate;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.gson.Gson;
 
 public class TransferTool {
@@ -175,6 +178,7 @@ public class TransferTool {
         CloseableHttpClient httpclient = HttpClients.createDefault();
         final List<String> scrollId = Lists.newArrayList();
         final AtomicInteger count = new AtomicInteger(0);
+        final Map<String, Object> mapping = selectTypeMapping(targetHost, targetIndex, targetType);
         try {
             while (true) {
                 HttpPost httppost = new HttpPost("http://" + sourceHost + "/_search/scroll?scroll=1m&size=" + bulkSize);
@@ -208,8 +212,8 @@ public class TransferTool {
                     System.out.println("total " + count.get());
                     break;
                 }
-                createDocs(targetHost, targetIndex, targetType, result);
                 count.addAndGet(result.size());
+                createDocs(targetHost, targetIndex, targetType, result, mapping);
                 System.out.println("insert " + count);
             }
         } catch (Exception e) {
@@ -219,29 +223,103 @@ public class TransferTool {
         }
     }
 
-    private static void createDocs(final String host, final String index, final String type, final List<Map> docs) throws IOException {
+    private static Map<String, Object> selectTypeMapping(final String host, final String index, final String type) throws IOException {
+        CloseableHttpClient httpclient = HttpClients.createDefault();
+        try {
+            final Gson gson = new Gson();
+            HttpGet httpget = new HttpGet("http://" + host + "/" + index + "/" + type + "/_mapping/");
+            System.out.println("Executing request " + httpget.getRequestLine());
+            ResponseHandler<Map> responseHandler = new ResponseHandler<Map>() {
+
+                @Override
+                public Map handleResponse(final HttpResponse response) throws ClientProtocolException, IOException {
+                    int status = response.getStatusLine().getStatusCode();
+                    if (status >= 200 && status < 300) {
+                        HttpEntity entity = response.getEntity();
+                        Map map = gson.fromJson(EntityUtils.toString(entity, "UTF-8"), Map.class);
+                        Map mappings = (Map) ((Map) (((Map) (map.get(index))).get("mappings"))).get(type);
+                        return mappings;
+                    }
+                    throw new ClientProtocolException("Unexpected response status: " + status + ", " + response.getStatusLine().getReasonPhrase());
+                }
+
+            };
+            return httpclient.execute(httpget, responseHandler);
+        } finally {
+            httpclient.close();
+        }
+    }
+
+    private static void createDocs(final String host, final String index, final String type, final List<Map> docs, final Map<String, Object> mapping) throws IOException {
         CloseableHttpClient httpclient = HttpClients.createDefault();
         StringBuilder messages = new StringBuilder();
-        Gson gson = new Gson();
+        final Gson gson = new Gson();
         for (Map doc : docs) {
             messages.append("{ \"create\" : { \"_index\" : \"" + index + "\", \"_type\" : \"" + type + "\" , \"_id\" : \"" + doc.get("_id") + "\" } }").append("\n");
-            messages.append(gson.toJson(doc.get("_source"))).append("\n");
+            messages.append(gson.toJson(converse(doc.get("_source"), mapping))).append("\n");
+            Map map = (Map) converse(doc.get("_source"), mapping);
         }
-        // System.out.println(messages);
         try {
             HttpPost httpPost = new HttpPost("http://" + host + "/_bulk");
             StringEntity entity = new StringEntity(messages.toString(), "UTF-8");
             httpPost.setEntity(entity);
-            System.out.println("Executing request " + httpPost.getRequestLine());
-            CloseableHttpResponse response = httpclient.execute(httpPost);
-            if (response.getStatusLine().getStatusCode() < 200 || response.getStatusLine().getStatusCode() >= 300) {
-                throw new ClientProtocolException("Unexpected response status: " + response.getStatusLine().getStatusCode());
-            }
+            ResponseHandler<List> responseHandler = new ResponseHandler<List>() {
+
+                @Override
+                public List handleResponse(final HttpResponse response) throws ClientProtocolException, IOException {
+                    int status = response.getStatusLine().getStatusCode();
+                    if (status >= 200 && status < 300) {
+                        HttpEntity entity = response.getEntity();
+                        Map map = gson.fromJson(EntityUtils.toString(entity, "UTF-8"), Map.class);
+                        if (Boolean.valueOf(map.get("errors").toString())) {
+                            return (List) map.get("items");
+                        }
+                        return Lists.newArrayList();
+                    }
+                    throw new ClientProtocolException("Unexpected response status: " + status + ", " + response.getStatusLine().getReasonPhrase());
+                }
+
+            };
+            List failedIterms = httpclient.execute(httpPost, responseHandler);
+            Iterators.filter(failedIterms.iterator(), new Predicate<Object>() {
+
+                @Override
+                public boolean apply(Object input) {
+                    System.out.println(input);
+                    return false;
+                }
+
+            });
+            System.out.println("Executing request " + httpPost.getRequestLine() + " with failed iterms " + failedIterms);
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
             httpclient.close();
             refresh(index, host);
+        }
+    }
+
+    private static Object converse(Object source, Map mapping) {
+        if (mapping.containsKey("properties") && source instanceof List) {
+            Map fieldMapping = (Map) mapping.get("properties");
+            List list = Lists.newArrayList();
+            for (Object obj : (List) source) {
+                list.add(converse(obj, fieldMapping));
+            }
+            return list;
+        } else if (mapping.containsKey("properties") && source instanceof Map) {
+            Map fieldMapping = (Map) mapping.get("properties");
+            Map conversedMap = Maps.newHashMap();
+            for (Object key : fieldMapping.keySet()) {
+                if (((Map) source).containsKey(key)) {
+                    conversedMap.put(key, converse(((Map) source).get(key), (Map) fieldMapping.get(key)));
+                }
+            }
+            return conversedMap;
+        } else if (mapping.containsKey("type") && (StringUtils.equals(mapping.get("type").toString(), "integer") || StringUtils.equals(mapping.get("type").toString(), "long"))) {
+            return (long) Double.parseDouble(source.toString());
+        } else {
+            return source;
         }
     }
 
@@ -297,4 +375,5 @@ public class TransferTool {
             httpclient.close();
         }
     }
+
 }
